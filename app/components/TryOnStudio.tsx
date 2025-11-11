@@ -203,49 +203,60 @@ export default function TryOnStudio() {
   }
 
   /* Try-on (FormData ile) */
-  async function handleRun() {
-    const humanToUse = humanSource === "generated" ? generatedModelUrl : userImage;
-    if (!humanToUse || !garmentImage) return;
+ /* Try-on (FormData ile) */
+async function handleRun() {
+  const humanToUse = humanSource === "generated" ? generatedModelUrl : userImage;
+  if (!humanToUse || !garmentImage) return;
 
-    setIsLoading(true);
-    setPreview(null);
-    setVideoUrl(null);
+  setIsLoading(true);
+  setPreview(null);
+  setVideoUrl(null);
 
-    const toBlob = async (src: string) => {
-      if (src.startsWith("data:")) {
-        const [meta, b64] = src.split(",");
-        const mime = /data:(.*?);base64/.exec(meta)?.[1] || "image/png";
-        const bin = atob(b64);
-        const u8 = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-        return new Blob([u8], { type: mime });
-      }
-      const r = await fetch(src);
-      return await r.blob();
-    };
-
-    try {
-      const fd = new FormData();
-      fd.append("human_image", await toBlob(humanToUse));
-      fd.append("garment_image", await toBlob(garmentImage));
-      fd.append("meta_prompt", finalPrompt);
-
-      const { image_url } = await postFormDataJSONSafe(TRYON_ENDPOINT, fd);
-      if (!image_url) throw new Error("No image in response");
-
-      try {
-        const cropped = await cropTransparent(image_url);
-        setPreview(cropped || image_url);
-      } catch {
-        setPreview(image_url);
-      }
-    } catch (e: any) {
-      console.error(e);
-      alert("Try-on başarısız: " + (e?.message || e));
-    } finally {
-      setIsLoading(false);
+  const toBlob = async (src: string) => {
+    if (src.startsWith("data:")) {
+      const [meta, b64] = src.split(",");
+      const mime = /data:(.*?);base64/.exec(meta)?.[1] || "image/png";
+      const bin = atob(b64);
+      const u8 = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+      return new Blob([u8], { type: mime });
     }
+    const r = await fetch(src);
+    return await r.blob();
+  };
+
+  try {
+    const fd = new FormData();
+    fd.append("human_image", await toBlob(humanToUse));
+    fd.append("garment_image", await toBlob(garmentImage));
+    fd.append("meta_prompt", finalPrompt);
+
+    // ⬇️ Esnek okuma: image_url || urls[0] || url
+    const resp = await postFormDataJSONSafe(TRYON_ENDPOINT, fd);
+    const imageUrl: string | undefined =
+      resp?.image_url ||
+      (Array.isArray(resp?.urls) && resp.urls[0]) ||
+      resp?.url;
+
+    if (!imageUrl) {
+      console.error("Server JSON:", resp);
+      throw new Error("No image in response");
+    }
+
+    // (opsiyonel) transparan kenar kırpma
+    try {
+      const cropped = await cropTransparent(imageUrl);
+      setPreview(cropped || imageUrl);
+    } catch {
+      setPreview(imageUrl);
+    }
+  } catch (e: any) {
+    console.error(e);
+    alert("Try-on başarısız: " + (e?.message || e));
+  } finally {
+    setIsLoading(false);
   }
+}
 
   /* Video: Image → Video (FAL MiniMax Hailuo-02) */
   async function handleGenerateVideo() {

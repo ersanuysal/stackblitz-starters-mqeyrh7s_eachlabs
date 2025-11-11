@@ -18,7 +18,10 @@ async function safeJson(res: Response) {
 
 async function uploadPublicUrl(file: File | Blob, filename = "upload.png") {
   const key = `uploads/${Date.now()}-${filename}`;
-  const { url } = await put(key, file as any, { access: "public" });
+  // 🔑 ÖNEMLİ: Vercel Blob için token'ı explicit geçiriyoruz
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  if (!token) throw new Error("BLOB_READ_WRITE_TOKEN missing on server");
+  const { url } = await put(key, file as any, { access: "public", token });
   return url;
 }
 
@@ -49,15 +52,49 @@ async function tryCreatePrediction(
     });
     const json = await safeJson(res);
     if (res.ok) return { ok: true, res, json, variant };
-    // 401 ise sonraki varyanta geç
     if (res.status !== 401) {
-      // 401 dışı hata—denemeyi bırak
       return { ok: false, res, json, variant };
     }
   }
-  // tüm varyantlar 401
   const res = new Response(JSON.stringify({ error: "All auth variants 401" }), { status: 401 });
   return { ok: false, res, json: { error: "All auth variants 401" }, variant: "all-401" };
+}
+
+// === Eachlabs çıktı URL'ini farklı formatlarda yakala ===
+function extractOutputUrls(payload: any): string[] {
+  const urls: string[] = [];
+
+  // output: string[] veya {url:string}[]
+  if (Array.isArray(payload?.output)) {
+    for (const it of payload.output) {
+      if (typeof it === "string") urls.push(it);
+      else if (it?.url) urls.push(it.url);
+    }
+  }
+
+  // data.output: string[] veya {url:string}[]
+  if (!urls.length && Array.isArray(payload?.data?.output)) {
+    for (const it of payload.data.output) {
+      if (typeof it === "string") urls.push(it);
+      else if (it?.url) urls.push(it.url);
+    }
+  }
+
+  // output_url (tek) / output_urls (liste)
+  if (!urls.length && typeof payload?.output_url === "string") urls.push(payload.output_url);
+  if (!urls.length && Array.isArray(payload?.output_urls)) {
+    for (const u of payload.output_urls) if (typeof u === "string") urls.push(u);
+  }
+
+  // (opsiyonel) bazı modeller base64 döndürebilir
+  if (!urls.length && typeof payload?.image_base64 === "string") {
+    urls.push(`data:image/jpeg;base64,${payload.image_base64}`);
+  }
+  if (!urls.length && typeof payload?.data?.image_base64 === "string") {
+    urls.push(`data:image/jpeg;base64,${payload.data.image_base64}`);
+  }
+
+  return urls;
 }
 
 // ===== Route =====
@@ -124,7 +161,7 @@ export async function POST(req: Request) {
     const pollHeadersVariants: Record<string, Record<string, string>> = {
       bearer: { Authorization: `Bearer ${EACHLABS_KEY}`, "X-API-Key": EACHLABS_KEY },
       "api-key": { Authorization: `Api-Key ${EACHLABS_KEY}`, "X-API-Key": EACHLABS_KEY },
-      raw: { Authorization: EACHLABS_KEY, "X-API-Key": EACHLABS_KEY },
+      raw: { Authorization: `${EACHLABS_KEY}`, "X-API-Key": EACHLABS_KEY },
     };
     const pollHeaders = pollHeadersVariants[create.variant] || pollHeadersVariants["bearer"];
 
@@ -137,7 +174,6 @@ export async function POST(req: Request) {
       const pollJson = await safeJson(pollRes);
 
       if (!pollRes.ok) {
-        // Yetkisiz / diğer hata—hemen döndür
         console.error("[eachlabs:poll] status:", pollRes.status, "json:", pollJson);
         if (pollRes.status === 401) {
           return NextResponse.json(
@@ -160,16 +196,19 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Prediction timeout or no result" }, { status: 504 });
     }
 
-    const imageUrl =
-      resultData?.output?.[0]?.url ||
-      resultData?.data?.output?.[0]?.url ||
-      null;
-
-    if (!imageUrl) {
+    // 4) Çıktı URL'ini normalize et
+    const urls = extractOutputUrls(resultData);
+    if (!urls.length) {
+      console.error("Eachlabs result (no image):", JSON.stringify(resultData, null, 2));
       return NextResponse.json({ error: "No image URL found", raw: resultData }, { status: 500 });
     }
 
-    return NextResponse.json({ image_url: imageUrl, id, authVariant: create.variant });
+    return NextResponse.json({
+      image_url: urls[0],   // geriye dönük kullanım
+      urls,                 // tüm alternatifler
+      id,
+      authVariant: create.variant
+    });
   } catch (err: any) {
     console.error("[/api/tryon] error:", err);
     return NextResponse.json({ error: err?.message || "Server error" }, { status: 500 });
